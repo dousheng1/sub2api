@@ -108,7 +108,7 @@ backend/data/
 # ===================
 # 本地配置文件（包含敏感信息）
 # ===================
-backend/config.yaml
+backend/configBack.yaml
 deploy/config.yaml
 backend/.installed
 

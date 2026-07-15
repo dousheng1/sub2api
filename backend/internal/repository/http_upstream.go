@@ -86,6 +86,9 @@ const (
 	upstreamProtocolModeOpenAIH1         = "openai_h1"
 	upstreamProtocolModeOpenAIH2         = "openai_h2"
 	upstreamProtocolModeOpenAIH1Fallback = "openai_h1_fallback"
+	// Serper 返回短 JSON 响应，不依赖 HTTP/2 多路复用。部分边缘节点或代理会在
+	// HTTP/2 首个 stream 上返回 PROTOCOL_ERROR，因此使用独立的 HTTP/1.1 连接池。
+	upstreamProtocolModeSerperH1 = "serper_h1"
 )
 
 var errUpstreamClientLimitReached = errors.New("upstream client cache limit reached")
@@ -964,6 +967,9 @@ func (s *httpUpstreamService) resolveOpenAIHTTP2Settings() openAIHTTP2Settings {
 }
 
 func (s *httpUpstreamService) resolveProtocolMode(profile service.HTTPUpstreamProfile, proxyKey string, parsedProxy *url.URL) string {
+	if profile == service.HTTPUpstreamProfileSerper {
+		return upstreamProtocolModeSerperH1
+	}
 	if profile != service.HTTPUpstreamProfileOpenAI {
 		return upstreamProtocolModeDefault
 	}
@@ -1283,6 +1289,10 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	case upstreamProtocolModeOpenAIH1Fallback:
 		// 显式禁用 HTTP/2，确保代理不兼容场景回退到 HTTP/1.1。
+		transport.ForceAttemptHTTP2 = false
+		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	case upstreamProtocolModeSerperH1:
+		// 显式禁用 HTTP/2，避免 Serper 边缘节点或中间代理返回 stream PROTOCOL_ERROR。
 		transport.ForceAttemptHTTP2 = false
 		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	}

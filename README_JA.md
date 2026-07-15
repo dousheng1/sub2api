@@ -521,10 +521,10 @@ VERSION="$(./scripts/resolve-version.sh)"
 go build -tags embed -ldflags="-X main.Version=${VERSION}" -o sub2api ./cmd/server
 
 # 5. 設定ファイルを作成
-cp ../deploy/config.example.yaml ./config.yaml
+cp ../deploy/config.example.yaml ./configBack.yaml
 
 # 6. 設定を編集
-nano config.yaml
+nano configBack.yaml
 ```
 
 > **注意:** `-tags embed` フラグはフロントエンドをバイナリに組み込みます。このフラグがない場合、バイナリはフロントエンド UI を提供しません。
@@ -640,10 +640,10 @@ URL バリデーションまたはレスポンスヘッダーフィルタリン�
 
 2. **すでに `config.yaml` を作成してしまった場合:** 初回起動前に一時的に退避してウィザードを発生させ、完了後に戻します:
    ```bash
-   mv config.yaml config.yaml.bak
-   ./sub2api        # ウィザードが http://localhost:8080 で起動し、新しい config.yaml を生成します
+   mv configBack.yaml configBack.yaml.bak
+   ./sub2api        # ウィザードが http://localhost:8080 で起動し、新しい configBack.yaml を生成します
    # ウィザード完了後、Ctrl+C でサーバーを停止し、設定を復元します:
-   mv config.yaml.bak config.yaml
+   mv configBack.yaml.bak configBack.yaml
    ./sub2api        # 通常モードで再起動し、作成した管理者でログインします
    ```
 

@@ -9,6 +9,10 @@ type HTTPUpstreamProfile string
 const (
 	HTTPUpstreamProfileDefault HTTPUpstreamProfile = ""
 	HTTPUpstreamProfileOpenAI  HTTPUpstreamProfile = "openai"
+	// HTTPUpstreamProfileSerper 强制 serper 上游走 HTTP/1.1。serper（Cloudflare
+	// 边缘）与共享 client 的池化 HTTP/2 连接之间会反复出现 stream PROTOCOL_ERROR，
+	// 而 serper 是简单 JSON 请求/响应 API，无需 h2 多路复用，强制 h1 可彻底规避。
+	HTTPUpstreamProfileSerper HTTPUpstreamProfile = "serper"
 )
 
 type httpUpstreamProfileContextKey struct{}
@@ -35,7 +39,7 @@ func HTTPUpstreamProfileFromContext(ctx context.Context) HTTPUpstreamProfile {
 		return HTTPUpstreamProfileDefault
 	}
 	switch profile {
-	case HTTPUpstreamProfileOpenAI:
+	case HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileSerper:
 		return profile
 	default:
 		return HTTPUpstreamProfileDefault

@@ -538,10 +538,10 @@ VERSION="$(./scripts/resolve-version.sh)"
 go build -tags embed -ldflags="-X main.Version=${VERSION}" -o sub2api ./cmd/server
 
 # 5. 创建配置文件
-cp ../deploy/config.example.yaml ./config.yaml
+cp ../deploy/config.example.yaml ./configBack.yaml
 
 # 6. 编辑配置
-nano config.yaml
+nano configBack.yaml
 ```
 
 > **注意：** `-tags embed` 参数会将前端嵌入到二进制文件中。不使用此参数编译的程序将不包含前端界面。
@@ -686,10 +686,10 @@ Invalid base URL: invalid url scheme: http
 
 2. **如果你已经创建了 `config.yaml`：** 首次启动前先把它临时移走以触发向导，完成后再恢复：
    ```bash
-   mv config.yaml config.yaml.bak
-   ./sub2api        # 向导在 http://localhost:8080 启动，并生成新的 config.yaml
+   mv configBack.yaml configBack.yaml.bak
+   ./sub2api        # 向导在 http://localhost:8080 启动，并生成新的 configBack.yaml
    # 向导完成后 Ctrl+C 停服，再恢复你的配置：
-   mv config.yaml.bak config.yaml
+   mv configBack.yaml.bak configBack.yaml
    ./sub2api        # 重启进入正常模式，用刚创建的管理员登录
    ```
 

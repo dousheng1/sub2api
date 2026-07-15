@@ -524,10 +524,10 @@ VERSION="$(./scripts/resolve-version.sh)"
 go build -tags embed -ldflags="-X main.Version=${VERSION}" -o sub2api ./cmd/server
 
 # 5. Create configuration file
-cp ../deploy/config.example.yaml ./config.yaml
+cp ../deploy/config.example.yaml ./configBack.yaml
 
 # 6. Edit configuration
-nano config.yaml
+nano configBack.yaml
 ```
 
 > **Note:** The `-tags embed` flag embeds the frontend into the binary. Without this flag, the binary will not serve the frontend UI.
@@ -684,10 +684,10 @@ Because step 5 above pre-creates `config.yaml`, the setup wizard will be **skipp
 
 2. **If you already created `config.yaml`:** Temporarily move it aside so the wizard can trigger on first run, then restore it afterwards:
    ```bash
-   mv config.yaml config.yaml.bak
-   ./sub2api        # wizard runs at http://localhost:8080 and writes a fresh config.yaml
+   mv configBack.yaml configBack.yaml.bak
+   ./sub2api        # wizard runs at http://localhost:8080 and writes a fresh configBack.yaml
    # stop the server (Ctrl+C) once the wizard completes, then restore your config:
-   mv config.yaml.bak config.yaml
+   mv configBack.yaml.bak configBack.yaml
    ./sub2api        # restart in normal mode and log in with the admin you just created
    ```
 

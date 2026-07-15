@@ -387,7 +387,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.TurnstileSecretKey = settings[SettingKeyTurnstileSecretKey]
 
 	// LinuxDo Connect 设置：
-	// - 兼容 config.yaml/env（避免老部署因为未迁移到数据库设置而被意外关闭）
+	// - 兼容 configBack.yaml/env（避免老部署因为未迁移到数据库设置而被意外关闭）
 	// - 支持在后台“系统设置”中覆盖并持久化（存储于 DB）
 	linuxDoBase := config.LinuxDoConnectConfig{}
 	if s.cfg != nil {
@@ -419,7 +419,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.LinuxDoConnectClientSecretConfigured = result.LinuxDoConnectClientSecret != ""
 
 	// DingTalk Connect 设置：
-	// - 兼容 config.yaml/env
+	// - 兼容 configBack.yaml/env
 	// - 支持后台系统设置覆盖并持久化（存储于 DB）
 	dingTalkBase := config.DingTalkConnectConfig{}
 	if s.cfg != nil {
@@ -549,7 +549,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	}
 
 	// Generic OIDC 设置：
-	// - 兼容 config.yaml/env
+	// - 兼容 configBack.yaml/env
 	// - 支持后台系统设置覆盖并持久化（存储于 DB）
 	oidcBase := config.OIDCConnectConfig{}
 	if s.cfg != nil {

@@ -674,7 +674,7 @@ func TestLoadForcedCodexInstructionsTemplate(t *testing.T) {
 
 	tempDir := t.TempDir()
 	templatePath := filepath.Join(tempDir, "codex-instructions.md.tmpl")
-	configPath := filepath.Join(tempDir, "config.yaml")
+	configPath := filepath.Join(tempDir, "configBack.yaml")
 
 	require.NoError(t, os.WriteFile(templatePath, []byte("server-prefix\n\n{{ .ExistingInstructions }}"), 0o644))
 	yamlSafePath := filepath.ToSlash(templatePath)

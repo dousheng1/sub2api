@@ -257,6 +257,11 @@ func (a *Account) IsGrokOAuth() bool {
 	return a.IsGrok() && a.Type == AccountTypeOAuth
 }
 
+// IsSerper 判断账号是否为 serper 平台（google.serper.dev 搜索 API）。
+func (a *Account) IsSerper() bool {
+	return a.Platform == PlatformSerper
+}
+
 func (a *Account) IsOpenAICompatible() bool {
 	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok)
 }
@@ -896,10 +901,16 @@ func (a *Account) GetBaseURL() string {
 	}
 	baseURL := a.GetCredential("base_url")
 	if baseURL == "" {
+		if a.Platform == PlatformSerper {
+			return "https://google.serper.dev"
+		}
 		return "https://api.anthropic.com"
 	}
 	if a.Platform == PlatformAntigravity {
 		return strings.TrimRight(baseURL, "/") + "/antigravity"
+	}
+	if a.Platform == PlatformSerper {
+		return strings.TrimRight(baseURL, "/")
 	}
 	return baseURL
 }

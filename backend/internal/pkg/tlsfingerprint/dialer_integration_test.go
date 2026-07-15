@@ -115,7 +115,7 @@ func TestAllProfiles(t *testing.T) {
 	}
 
 	// Define all profiles to test with their expected fingerprints
-	// These profiles are from config.yaml gateway.tls_fingerprint.profiles
+	// These profiles are from configBack.yaml gateway.tls_fingerprint.profiles
 	profiles := []TestProfileExpectation{
 		{
 			// Default profile (Node.js 24.x)

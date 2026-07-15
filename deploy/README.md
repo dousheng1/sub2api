@@ -562,7 +562,7 @@ sudo systemctl status sub2api
 sudo journalctl -u sub2api -n 50
 
 # Check config file
-sudo cat /etc/sub2api/config.yaml
+sudo cat /etc/sub2api/configBack.yaml
 
 # Check PostgreSQL
 sudo systemctl status postgresql

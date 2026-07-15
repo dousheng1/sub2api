@@ -1,8 +1,8 @@
 # Sub2API Configuration File
 # Sub2API 配置文件
 #
-# Copy this file to /etc/sub2api/config.yaml and modify as needed
-# 复制此文件到 /etc/sub2api/config.yaml 并根据需要修改
+# Copy this file to /etc/sub2api/configBack.yaml and modify as needed
+# 复制此文件到 /etc/sub2api/configBack.yaml 并根据需要修改
 #
 # Documentation / 文档: https://github.com/Wei-Shaw/sub2api
 
@@ -131,6 +131,7 @@ security:
       - "api.minimaxi.com"
       - "generativelanguage.googleapis.com"
       - "cloudcode-pa.googleapis.com"
+      - "google.serper.dev"
       - "*.openai.azure.com"
     # Allowed hosts for pricing data download
     # 允许下载定价数据的主机列表

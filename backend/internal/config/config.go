@@ -1882,6 +1882,7 @@ func setDefaults() {
 		"api.minimaxi.com",
 		"generativelanguage.googleapis.com",
 		"cloudcode-pa.googleapis.com",
+		"google.serper.dev",
 		"*.openai.azure.com",
 	})
 	viper.SetDefault("security.url_allowlist.pricing_hosts", []string{
@@ -3488,7 +3489,7 @@ func generateJWTSecret(byteLength int) (string, error) {
 // GetServerAddress returns the server address (host:port) from config file or environment variable.
 // This is a lightweight function that can be used before full config validation,
 // such as during setup wizard startup.
-// Priority: config.yaml > environment variables > defaults
+// Priority: configBack.yaml > environment variables > defaults
 func GetServerAddress() string {
 	v := viper.New()
 	v.SetConfigName("config")

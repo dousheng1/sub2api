@@ -38,6 +38,7 @@ func newGatewayRoutesTestRouterWithConfig(cfg *config.Config, platform ...string
 			Gateway:       &handler.GatewayHandler{},
 			OpenAIGateway: &handler.OpenAIGatewayHandler{},
 			AsyncImage:    handler.NewAsyncImageHandler(nil, nil),
+			Serper:        handler.NewSerperHandler(nil, nil, nil),
 		},
 		servermiddleware.APIKeyAuthMiddleware(func(c *gin.Context) {
 			groupID := int64(1)
@@ -56,6 +57,34 @@ func newGatewayRoutesTestRouterWithConfig(cfg *config.Config, platform ...string
 	)
 
 	return router
+}
+
+func TestGatewayRoutesSerperOnlyRegistersSearchPOST(t *testing.T) {
+	router := newGatewayRoutesTestRouter(service.PlatformSerper)
+
+	var registered []string
+	for _, route := range router.Routes() {
+		if strings.HasPrefix(route.Path, "/serper") {
+			registered = append(registered, route.Method+" "+route.Path)
+		}
+	}
+	require.ElementsMatch(t, []string{http.MethodPost + " /serper/search"}, registered)
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/serper/search"},
+		{method: http.MethodPost, path: "/serper/news"},
+		{method: http.MethodPost, path: "/serper/search/extra"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		w := httptest.NewRecorder()
+
+		router.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusNotFound, w.Code, "method=%s path=%s", tc.method, tc.path)
+	}
 }
 
 func TestGatewayRoutesOpenAIResponsesCompactPathIsRegistered(t *testing.T) {

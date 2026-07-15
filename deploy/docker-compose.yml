@@ -26,14 +26,14 @@ services:
     ports:
       - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
     volumes:
-      # Data persistence (config.yaml will be auto-generated here)
+      # Data persistence (configBack.yaml will be auto-generated here)
       - sub2api_data:/app/data
-      # Optional: Mount custom config.yaml (uncomment and create the file first)
-      # Copy config.example.yaml to config.yaml, modify it, then uncomment:
-      # - ./config.yaml:/app/data/config.yaml
+      # Optional: Mount custom configBack.yaml (uncomment and create the file first)
+      # Copy config.example.yaml to configBack.yaml, modify it, then uncomment:
+      # - ./configBack.yaml:/app/data/configBack.yaml
       # Optional: Mount a custom Codex instructions template file, then point
       # gateway.forced_codex_instructions_template_file at /app/data/codex-instructions.md.tmpl
-      # in config.yaml.
+      # in configBack.yaml.
       # - ./codex-instructions.md.tmpl:/app/data/codex-instructions.md.tmpl:ro
     environment:
       # =======================================================================

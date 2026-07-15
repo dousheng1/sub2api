@@ -24,7 +24,7 @@ import (
 
 // Config paths
 const (
-	ConfigFileName             = "config.yaml"
+	ConfigFileName             = "configBack.yaml"
 	InstallLockFile            = ".installed"
 	defaultUserConcurrency     = 5
 	simpleModeAdminConcurrency = 30
@@ -62,7 +62,7 @@ func GetDataDir() string {
 	return "."
 }
 
-// GetConfigFilePath returns the full path to config.yaml
+// GetConfigFilePath returns the full path to configBack.yaml
 func GetConfigFilePath() string {
 	return GetDataDir() + "/" + ConfigFileName
 }

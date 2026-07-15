@@ -83,3 +83,18 @@ describe('PlatformTypeBadge OpenAI authentication modes', () => {
     expect(wrapper.text()).toContain('OAuth')
   })
 })
+
+describe('PlatformTypeBadge Serper platform', () => {
+  it('renders Serper API key accounts without falling back to Gemini', () => {
+    const wrapper = mount(PlatformTypeBadge, {
+      props: {
+        platform: 'serper',
+        type: 'apikey',
+      },
+    })
+
+    expect(wrapper.text()).toContain('Serper')
+    expect(wrapper.text()).toContain('Key')
+    expect(wrapper.text()).not.toContain('Gemini')
+  })
+})

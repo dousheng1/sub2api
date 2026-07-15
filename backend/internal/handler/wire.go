@@ -164,6 +164,11 @@ func ProvideAdminSettingHandler(settingService *service.SettingService, emailSer
 	return h
 }
 
+// ProvideSerperConcurrencyHelper creates the non-streaming concurrency helper used by Serper.
+func ProvideSerperConcurrencyHelper(concurrencyService *service.ConcurrencyService) *ConcurrencyHelper {
+	return NewConcurrencyHelper(concurrencyService, SSEPingFormatNone, 0)
+}
+
 // ProvideHandlers creates the Handlers struct
 func ProvideHandlers(
 	authHandler *AuthHandler,
@@ -184,6 +189,7 @@ func ProvideHandlers(
 	availableChannelHandler *AvailableChannelHandler,
 	asyncImageHandler *AsyncImageHandler,
 	batchImageHandler *BatchImageHandler,
+	serperHandler *SerperHandler,
 	_ *service.IdempotencyCoordinator,
 	_ *service.IdempotencyCleanupService,
 ) *Handlers {
@@ -206,6 +212,7 @@ func ProvideHandlers(
 		AvailableChannel: availableChannelHandler,
 		AsyncImage:       asyncImageHandler,
 		BatchImage:       batchImageHandler,
+		Serper:           serperHandler,
 	}
 }
 
@@ -229,6 +236,8 @@ var ProviderSet = wire.NewSet(
 	NewAvailableChannelHandler,
 	NewAsyncImageHandler,
 	ProvideBatchImageHandler,
+	ProvideSerperConcurrencyHelper,
+	NewSerperHandler,
 
 	// Admin handlers
 	admin.NewDashboardHandler,

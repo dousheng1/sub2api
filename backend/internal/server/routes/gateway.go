@@ -354,6 +354,16 @@ func RegisterGatewayRoutes(
 		antigravityV1Beta.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
 	}
 
+	// Serper 反代路由（google.serper.dev 搜索 API）。
+	// 独立于 LLM 网关：只做 API Key 认证，不挂 requireGroup（serper 无 LLM 分组语义）。
+	serperGroup := r.Group("/serper")
+	serperGroup.Use(bodyLimit)
+	serperGroup.Use(clientRequestID)
+	serperGroup.Use(opsErrorLogger)
+	serperGroup.Use(gin.HandlerFunc(apiKeyAuth))
+	{
+		serperGroup.POST("/search", h.Serper.Search)
+	}
 }
 
 // getGroupPlatform extracts the group platform from the API Key stored in context.

@@ -471,8 +471,8 @@ func (s *SettingService) GetEmailOAuthProviderConfig(ctx context.Context, provid
 // GetLinuxDoConnectOAuthConfig 返回用于登录的"最终生效" LinuxDo Connect 配置。
 //
 // 优先级：
-// - 若对应系统设置键存在，则覆盖 config.yaml/env 的值
-// - 否则回退到 config.yaml/env 的值
+// - 若对应系统设置键存在，则覆盖 configBack.yaml/env 的值
+// - 否则回退到 configBack.yaml/env 的值
 func (s *SettingService) GetLinuxDoConnectOAuthConfig(ctx context.Context) (config.LinuxDoConnectConfig, error) {
 	if s == nil || s.cfg == nil {
 		return config.LinuxDoConnectConfig{}, infraerrors.ServiceUnavailable("CONFIG_NOT_READY", "config not loaded")
@@ -560,8 +560,8 @@ func (s *SettingService) GetLinuxDoConnectOAuthConfig(ctx context.Context) (conf
 // GetDingTalkConnectOAuthConfig 返回用于登录的"最终生效" DingTalk Connect 配置。
 //
 // 优先级：
-// - 若对应系统设置键存在，则覆盖 config.yaml/env 的值
-// - 否则回退到 config.yaml/env 的值
+// - 若对应系统设置键存在，则覆盖 configBack.yaml/env 的值
+// - 否则回退到 configBack.yaml/env 的值
 func (s *SettingService) GetDingTalkConnectOAuthConfig(ctx context.Context) (config.DingTalkConnectConfig, error) {
 	if s == nil || s.cfg == nil {
 		return config.DingTalkConnectConfig{}, infraerrors.ServiceUnavailable("CONFIG_NOT_READY", "config not loaded")
@@ -740,8 +740,8 @@ func (s *SettingService) GetWeChatConnectOAuthConfig(ctx context.Context) (WeCha
 // GetOIDCConnectOAuthConfig 返回用于登录的“最终生效” OIDC 配置。
 //
 // 优先级：
-// - 若对应系统设置键存在，则覆盖 config.yaml/env 的值
-// - 否则回退到 config.yaml/env 的值
+// - 若对应系统设置键存在，则覆盖 configBack.yaml/env 的值
+// - 否则回退到 configBack.yaml/env 的值
 func (s *SettingService) GetOIDCConnectOAuthConfig(ctx context.Context) (config.OIDCConnectConfig, error) {
 	if s == nil || s.cfg == nil {
 		return config.OIDCConnectConfig{}, infraerrors.ServiceUnavailable("CONFIG_NOT_READY", "config not loaded")

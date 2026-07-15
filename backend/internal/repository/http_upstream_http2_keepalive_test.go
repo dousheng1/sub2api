@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,4 +65,15 @@ func TestBuildUpstreamTransport_OpenAIH2_WithHTTPProxy_EnablesKeepAlive(t *testi
 	require.True(t, tr.ForceAttemptHTTP2)
 	require.NotNil(t, tr.TLSNextProto["h2"], "经代理的 openai_h2 也必须启用 http2 keepalive")
 	require.NotNil(t, tr.Proxy, "HTTP 代理仍须通过 Transport.Proxy 生效")
+}
+
+func TestHTTPUpstreamService_SerperProfileUsesHTTP1(t *testing.T) {
+	svc := &httpUpstreamService{}
+	protocolMode := svc.resolveProtocolMode(service.HTTPUpstreamProfileSerper, directProxyKey, nil)
+	require.Equal(t, "serper_h1", protocolMode)
+
+	tr, err := buildUpstreamTransport(http2KeepAliveTestPoolSettings(), nil, protocolMode)
+	require.NoError(t, err)
+	require.False(t, tr.ForceAttemptHTTP2, "serper_h1 不应主动协商 HTTP/2")
+	require.NotNil(t, tr.TLSNextProto, "serper_h1 必须显式禁用 HTTP/2")
 }

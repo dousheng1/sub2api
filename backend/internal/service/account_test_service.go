@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -203,7 +204,87 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		return s.routeAntigravityTest(c, account, modelID, prompt)
 	}
 
+	if account.Platform == PlatformSerper {
+		return s.testSerperAccountConnection(c, account)
+	}
+
 	return s.testClaudeAccountConnection(c, account, modelID)
+}
+
+// testSerperAccountConnection 对 serper 账号做一次真实的 /search 探活。
+// serper 无模型概念，认证为 X-API-KEY，返回 200 即视为连通。
+func (s *AccountTestService) testSerperAccountConnection(c *gin.Context, account *Account) error {
+	ctx := c.Request.Context()
+
+	if s.httpUpstream == nil {
+		return s.sendErrorAndEnd(c, "HTTP upstream not configured")
+	}
+
+	apiKey := strings.TrimSpace(account.GetCredential("api_key"))
+	if apiKey == "" {
+		return s.sendErrorAndEnd(c, "Serper API key is missing")
+	}
+
+	baseURL := account.GetBaseURL()
+	if baseURL == "" {
+		baseURL = "https://google.serper.dev"
+	}
+	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid Serper base URL: %s", err.Error()))
+	}
+	parsedBaseURL, err := url.Parse(normalizedBaseURL)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to parse Serper base URL: %s", err.Error()))
+	}
+	parsedBaseURL.Path = strings.TrimRight(parsedBaseURL.Path, "/") + "/search"
+	parsedBaseURL.RawPath = ""
+	parsedBaseURL.RawQuery = ""
+	parsedBaseURL.Fragment = ""
+	searchURL := parsedBaseURL.String()
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: "serper/search"})
+
+	payloadBytes, err := json.Marshal(map[string]any{"q": "hello"})
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create Serper test payload")
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, searchURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create Serper request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-KEY", apiKey)
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Serper request failed: %s", err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode != http.StatusOK {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Serper API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
+	}
+
+	s.sendEvent(c, TestEvent{Type: "content", Text: "Serper 搜索连通正常"})
+	s.sendEvent(c, TestEvent{Type: "done", Success: true})
+	return nil
 }
 
 // testClaudeAccountConnection tests an Anthropic Claude account's connection
