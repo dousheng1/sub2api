@@ -195,6 +195,7 @@ func newSerperHandlerFixture(t *testing.T, cfg *config.Config, billingCache serv
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	serperGateway := service.NewSerperGatewayService(gateway, upstream, nil)
 	concurrencyHelper := NewConcurrencyHelper(concurrencyService, SSEPingFormatNone, 0)
