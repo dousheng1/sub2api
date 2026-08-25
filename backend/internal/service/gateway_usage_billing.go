@@ -582,6 +582,22 @@ func (s *GatewayService) RecordUsage(ctx context.Context, input *RecordUsageInpu
 	}, &recordUsageOpts{})
 }
 
+// RecordUsageLog writes a pre-built usage log without applying billing or
+// quota side effects. Non-LLM gateway endpoints use this for audit-only rows.
+func (s *GatewayService) RecordUsageLog(ctx context.Context, usageLog *UsageLog) error {
+	if s == nil || usageLog == nil || s.usageLogRepo == nil {
+		return nil
+	}
+	if strings.TrimSpace(usageLog.RequestID) == "" {
+		usageLog.RequestID = resolveUsageBillingRequestID(ctx, "")
+	}
+	if usageLog.CreatedAt.IsZero() {
+		usageLog.CreatedAt = time.Now()
+	}
+	writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
+	return nil
+}
+
 // RecordUsageLongContextInput 记录使用量的输入参数（支持长上下文双倍计费）
 type RecordUsageLongContextInput struct {
 	Result                *ForwardResult

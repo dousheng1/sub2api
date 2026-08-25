@@ -38,7 +38,7 @@ func newGatewayRoutesTestRouterWithConfig(cfg *config.Config, platform ...string
 			Gateway:       &handler.GatewayHandler{},
 			OpenAIGateway: &handler.OpenAIGatewayHandler{},
 			AsyncImage:    handler.NewAsyncImageHandler(nil, nil),
-			Serper:        handler.NewSerperHandler(nil, nil, nil),
+			Serper:        handler.NewSerperHandler(nil, nil, nil, nil),
 		},
 		servermiddleware.APIKeyAuthMiddleware(func(c *gin.Context) {
 			groupID := int64(1)

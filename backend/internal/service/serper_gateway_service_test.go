@@ -95,8 +95,10 @@ func (s *serperHydrationAccountRepoStub) GetByID(context.Context, int64) (*Accou
 
 type serperAccountRepoStub struct {
 	AccountRepository
-	accounts     []Account
-	accountsByID map[int64]*Account
+	accounts             []Account
+	accountsByID         map[int64]*Account
+	schedulableUpdates   map[int64]bool
+	schedulableUpdateErr error
 }
 
 func (s *serperAccountRepoStub) GetByID(_ context.Context, id int64) (*Account, error) {
@@ -120,6 +122,25 @@ func (s *serperAccountRepoStub) ListSchedulableByGroupIDAndPlatform(_ context.Co
 func (s *serperAccountRepoStub) SetError(context.Context, int64, string) error { return nil }
 
 func (s *serperAccountRepoStub) SetRateLimited(context.Context, int64, time.Time) error {
+	return nil
+}
+
+func (s *serperAccountRepoStub) SetSchedulable(_ context.Context, id int64, schedulable bool) error {
+	if s.schedulableUpdates == nil {
+		s.schedulableUpdates = make(map[int64]bool)
+	}
+	s.schedulableUpdates[id] = schedulable
+	if s.schedulableUpdateErr != nil {
+		return s.schedulableUpdateErr
+	}
+	for i := range s.accounts {
+		if s.accounts[i].ID == id {
+			s.accounts[i].Schedulable = schedulable
+		}
+	}
+	if account := s.accountsByID[id]; account != nil {
+		account.Schedulable = schedulable
+	}
 	return nil
 }
 
@@ -325,6 +346,97 @@ func TestSerperGateway429SwitchesAccountAndReleasesBothSlots(t *testing.T) {
 	require.Equal(t, 1, concurrencyCache.releaseCalls[22])
 }
 
+func TestSerperGatewayAll429PreservesFinalResponse(t *testing.T) {
+	concurrencyCache := &serperConcurrencyCacheStub{}
+	upstream := &serperHTTPUpstreamStub{do: func(_ *http.Request, _ int64) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "Retry-After": []string{"7"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited"}`)),
+		}, nil
+	}}
+	svc, _, _, groupID := newSerperGatewayServiceForTest(t, []Account{
+		serperTestAccount(26, 1, ""),
+	}, concurrencyCache, upstream)
+
+	_, err := svc.ForwardSearch(context.Background(), &groupID, 509, "", nil, []byte(`{"q":"x"}`))
+
+	var rateLimitErr *SerperRateLimitError
+	require.ErrorAs(t, err, &rateLimitErr)
+	require.Equal(t, http.StatusTooManyRequests, rateLimitErr.Result.StatusCode)
+	require.Equal(t, "7", rateLimitErr.Result.Header.Get("Retry-After"))
+}
+
+func TestSerperGatewayCreditsExhaustedDisablesAndSwitchesAccount(t *testing.T) {
+	concurrencyCache := &serperConcurrencyCacheStub{}
+	upstream := &serperHTTPUpstreamStub{do: func(_ *http.Request, accountID int64) (*http.Response, error) {
+		if accountID == 27 {
+			return serperResponse(http.StatusBadRequest, io.NopCloser(strings.NewReader(`{"message":"Not enough credits","statusCode":400}`))), nil
+		}
+		return serperResponse(http.StatusOK, io.NopCloser(strings.NewReader(`{"ok":true}`))), nil
+	}}
+	svc, _, repo, groupID := newSerperGatewayServiceForTest(t, []Account{
+		serperTestAccount(27, 1, ""),
+		serperTestAccount(28, 2, ""),
+	}, concurrencyCache, upstream)
+
+	result, err := svc.ForwardSearch(context.Background(), &groupID, 510, "", nil, []byte(`{"q":"x"}`))
+
+	require.NoError(t, err)
+	require.Equal(t, int64(28), result.AccountID)
+	require.Equal(t, []int64{27, 28}, upstream.accountIDs)
+	require.Equal(t, map[int64]bool{27: false}, repo.schedulableUpdates)
+	require.False(t, repo.accountsByID[27].Schedulable)
+	require.Equal(t, 1, concurrencyCache.releaseCalls[27])
+	require.Equal(t, 1, concurrencyCache.releaseCalls[28])
+}
+
+func TestSerperGatewayAllCreditsExhaustedPreservesFinalResponse(t *testing.T) {
+	concurrencyCache := &serperConcurrencyCacheStub{}
+	upstream := &serperHTTPUpstreamStub{do: func(_ *http.Request, _ int64) (*http.Response, error) {
+		return serperResponse(http.StatusBadRequest, io.NopCloser(strings.NewReader(`{"message":"Not enough credits","statusCode":400}`))), nil
+	}}
+	svc, _, repo, groupID := newSerperGatewayServiceForTest(t, []Account{serperTestAccount(29, 1, "")}, concurrencyCache, upstream)
+
+	result, err := svc.ForwardSearch(context.Background(), &groupID, 511, "", nil, []byte(`{"q":"x"}`))
+
+	var creditsErr *SerperCreditsExhaustedError
+	require.ErrorAs(t, err, &creditsErr)
+	require.Same(t, result, creditsErr.Result)
+	require.Equal(t, http.StatusBadRequest, result.StatusCode)
+	require.JSONEq(t, `{"message":"Not enough credits","statusCode":400}`, string(result.Body))
+	require.Equal(t, map[int64]bool{29: false}, repo.schedulableUpdates)
+}
+
+func TestSerperGatewayOrdinaryBadRequestDoesNotDisableOrSwitch(t *testing.T) {
+	concurrencyCache := &serperConcurrencyCacheStub{}
+	upstream := &serperHTTPUpstreamStub{do: func(_ *http.Request, _ int64) (*http.Response, error) {
+		return serperResponse(http.StatusBadRequest, io.NopCloser(strings.NewReader(`{"message":"Invalid request","statusCode":400}`))), nil
+	}}
+	svc, _, repo, groupID := newSerperGatewayServiceForTest(t, []Account{serperTestAccount(30, 1, ""), serperTestAccount(31, 2, "")}, concurrencyCache, upstream)
+
+	result, err := svc.ForwardSearch(context.Background(), &groupID, 512, "", nil, []byte(`{"q":"x"}`))
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, result.StatusCode)
+	require.Equal(t, []int64{30}, upstream.accountIDs)
+	require.Empty(t, repo.schedulableUpdates)
+}
+
+func TestSerperGatewayCreditsMessageWithMismatchedStatusCodeDoesNotDisable(t *testing.T) {
+	concurrencyCache := &serperConcurrencyCacheStub{}
+	upstream := &serperHTTPUpstreamStub{do: func(_ *http.Request, _ int64) (*http.Response, error) {
+		return serperResponse(http.StatusBadRequest, io.NopCloser(strings.NewReader(`{"message":"Not enough credits","statusCode":403}`))), nil
+	}}
+	svc, _, repo, groupID := newSerperGatewayServiceForTest(t, []Account{serperTestAccount(32, 1, "")}, concurrencyCache, upstream)
+
+	result, err := svc.ForwardSearch(context.Background(), &groupID, 513, "", nil, []byte(`{"q":"x"}`))
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, result.StatusCode)
+	require.Empty(t, repo.schedulableUpdates)
+}
+
 func TestSerperGatewayMissingCredentialSwitchesBeforeDoAndReleasesSlot(t *testing.T) {
 	concurrencyCache := &serperConcurrencyCacheStub{}
 	upstream := &serperHTTPUpstreamStub{do: func(*http.Request, int64) (*http.Response, error) {
@@ -356,7 +468,9 @@ func TestSerperGatewayCapacityWaitPlanDoesNotSendUpstream(t *testing.T) {
 
 	_, err := svc.ForwardSearch(context.Background(), &groupID, 506, "", nil, []byte(`{"q":"x"}`))
 
-	require.Error(t, err)
+	var capacityErr *SerperCapacityError
+	require.ErrorAs(t, err, &capacityErr)
+	require.Equal(t, 1, capacityErr.RetryAfter)
 	require.Zero(t, upstream.calls)
 	require.Zero(t, concurrencyCache.releaseCalls[19])
 }

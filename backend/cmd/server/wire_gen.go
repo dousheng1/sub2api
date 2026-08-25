@@ -296,7 +296,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	batchImageHandler := handler.ProvideBatchImageHandler(batchImagePublicService, batchImageDownloadService, batchImageCleanupService, openAIGatewayHandler)
 	serperGatewayService := service.NewSerperGatewayService(gatewayService, httpUpstream, rateLimitService)
 	concurrencyHelper := handler.ProvideSerperConcurrencyHelper(concurrencyService)
-	serperHandler := handler.NewSerperHandler(serperGatewayService, concurrencyHelper, billingCacheService)
+	serperHandler := handler.NewSerperHandler(serperGatewayService, concurrencyHelper, billingCacheService, usageRecordWorkerPool)
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)
 	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, asyncImageHandler, batchImageHandler, serperHandler, idempotencyCoordinator, idempotencyCleanupService)

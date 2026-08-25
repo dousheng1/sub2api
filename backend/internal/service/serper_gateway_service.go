@@ -16,8 +16,10 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,6 +30,8 @@ import (
 
 // serperMaxResponseSize 限制上游响应体读取大小，防止异常大响应打爆内存。
 const serperMaxResponseSize = 10 * 1024 * 1024 // 10 MiB
+
+const serperSchedulableUpdateTimeout = 3 * time.Second
 
 // SerperGatewayService 负责 serper 平台的账号选择与请求转发。
 type SerperGatewayService struct {
@@ -48,12 +52,61 @@ func NewSerperGatewayService(gateway *GatewayService, httpUpstream HTTPUpstream,
 	}
 }
 
+// RecordUsageLog delegates Serper's audit-only usage row to the shared
+// GatewayService writer. No billing or quota mutation is performed.
+func (s *SerperGatewayService) RecordUsageLog(ctx context.Context, usageLog *UsageLog) error {
+	if s == nil || s.gateway == nil {
+		return nil
+	}
+	return s.gateway.RecordUsageLog(ctx, usageLog)
+}
+
 // SerperForwardResult 承载一次 serper 转发的结果，供 handler 写回客户端。
 type SerperForwardResult struct {
-	StatusCode int
-	Header     http.Header
-	Body       []byte
-	AccountID  int64
+	StatusCode        int
+	Header            http.Header
+	Body              []byte
+	AccountID         int64
+	UpstreamAttempted bool
+	Duration          time.Duration
+}
+
+// SerperCapacityError indicates that a selected account had no available
+// concurrency slot. The caller should retry the request instead of treating
+// this as an upstream service outage.
+type SerperCapacityError struct {
+	RetryAfter int
+}
+
+func (e *SerperCapacityError) Error() string {
+	return "serper: account capacity unavailable"
+}
+
+// SerperRateLimitError preserves the final upstream 429 after all eligible
+// accounts have been tried. This lets the HTTP handler return the upstream
+// rate-limit response instead of converting it to a generic 503.
+type SerperRateLimitError struct {
+	Result *SerperForwardResult
+}
+
+func (e *SerperRateLimitError) Error() string {
+	if e == nil || e.Result == nil {
+		return "serper: upstream rate limit exhausted"
+	}
+	return fmt.Sprintf("serper: upstream returned %d after account failover", e.Result.StatusCode)
+}
+
+// SerperCreditsExhaustedError preserves the final upstream 400 after all
+// eligible accounts reported that their Serper credits were exhausted.
+type SerperCreditsExhaustedError struct {
+	Result *SerperForwardResult
+}
+
+func (e *SerperCreditsExhaustedError) Error() string {
+	if e == nil || e.Result == nil {
+		return "serper: upstream credits exhausted"
+	}
+	return fmt.Sprintf("serper: upstream returned %d because credits are exhausted", e.Result.StatusCode)
 }
 
 // ForwardSearch 从号池选一个 serper 账号并把搜索请求转发到上游。
@@ -68,20 +121,43 @@ func (s *SerperGatewayService) ForwardSearch(
 ) (*SerperForwardResult, error) {
 	excluded := make(map[int64]struct{})
 	var lastErr error
+	var lastRateLimitResult *SerperForwardResult
+	var lastCreditsExhaustedResult *SerperForwardResult
+	var lastUpstreamResult *SerperForwardResult
+	lastSwitchStatus := 0
+	startedAt := time.Now()
+	finish := func(result *SerperForwardResult) *SerperForwardResult {
+		if result != nil {
+			result.Duration = time.Since(startedAt)
+		}
+		return result
+	}
 
 	for attempt := 0; attempt < s.maxAccountSwitches; attempt++ {
 		selection, err := s.gateway.SelectAccountWithLoadAwareness(ctx, groupID, "", "", excluded, "", sub2apiUserID)
 		if err != nil {
+			if lastCreditsExhaustedResult != nil {
+				return finish(lastCreditsExhaustedResult), &SerperCreditsExhaustedError{Result: lastCreditsExhaustedResult}
+			}
+			if lastSwitchStatus == http.StatusTooManyRequests && lastRateLimitResult != nil {
+				return finish(lastRateLimitResult), &SerperRateLimitError{Result: lastRateLimitResult}
+			}
 			if lastErr != nil {
-				return nil, lastErr
+				return finish(lastUpstreamResult), lastErr
 			}
 			return nil, err
 		}
 		if selection == nil || selection.Account == nil {
-			return nil, fmt.Errorf("serper: account selection returned no account")
+			if lastCreditsExhaustedResult != nil {
+				return finish(lastCreditsExhaustedResult), &SerperCreditsExhaustedError{Result: lastCreditsExhaustedResult}
+			}
+			if lastSwitchStatus == http.StatusTooManyRequests && lastRateLimitResult != nil {
+				return finish(lastRateLimitResult), &SerperRateLimitError{Result: lastRateLimitResult}
+			}
+			return finish(lastUpstreamResult), fmt.Errorf("serper: account selection returned no account")
 		}
 		if !selection.Acquired {
-			return nil, fmt.Errorf("serper: account capacity unavailable")
+			return finish(lastUpstreamResult), &SerperCapacityError{RetryAfter: 1}
 		}
 
 		account := selection.Account
@@ -102,29 +178,52 @@ func (s *SerperGatewayService) ForwardSearch(
 		}()
 		if err != nil {
 			if !switchAccount {
-				return nil, err
+				return finish(result), err
 			}
 			excluded[account.ID] = struct{}{}
 			lastErr = err
+			lastCreditsExhaustedResult = nil
+			// A pre-send credential/configuration failure supersedes any earlier
+			// upstream 429; only an uninterrupted final 429 chain is preserved.
+			lastSwitchStatus = 0
+			lastRateLimitResult = nil
 			continue
 		}
 		if switchAccount {
 			// 上游返回限流/鉴权错误：踢出该账号（写 rate_limited），换下一个重试。
 			excluded[account.ID] = struct{}{}
 			lastErr = fmt.Errorf("serper: account %d upstream returned %d", account.ID, result.StatusCode)
+			lastSwitchStatus = result.StatusCode
+			if isSerperCreditsExhausted(result) {
+				lastCreditsExhaustedResult = result
+			} else {
+				lastCreditsExhaustedResult = nil
+			}
+			if result.UpstreamAttempted {
+				lastUpstreamResult = result
+			}
+			if result.StatusCode == http.StatusTooManyRequests {
+				lastRateLimitResult = result
+			}
 			continue
 		}
-		return result, nil
+		return finish(result), nil
 	}
 
 	if lastErr != nil {
-		return nil, lastErr
+		if lastCreditsExhaustedResult != nil {
+			return finish(lastCreditsExhaustedResult), &SerperCreditsExhaustedError{Result: lastCreditsExhaustedResult}
+		}
+		if lastSwitchStatus == http.StatusTooManyRequests && lastRateLimitResult != nil {
+			return finish(lastRateLimitResult), &SerperRateLimitError{Result: lastRateLimitResult}
+		}
+		return finish(lastUpstreamResult), lastErr
 	}
 	return nil, fmt.Errorf("serper: no available account after %d attempts", s.maxAccountSwitches)
 }
 
 // forwardToAccount 用指定账号执行一次上游请求。
-// 返回 switchAccount=true 表示请求尚未发送，或明确收到 429/403，可安全换号。
+// 返回 switchAccount=true 表示凭证/配置失败，或明确收到 429/403，可安全换号。
 func (s *SerperGatewayService) forwardToAccount(
 	ctx context.Context,
 	account *Account,
@@ -133,6 +232,13 @@ func (s *SerperGatewayService) forwardToAccount(
 	reqHeader http.Header,
 	body []byte,
 ) (result *SerperForwardResult, switchAccount bool, err error) {
+	startedAt := time.Now()
+	result = &SerperForwardResult{AccountID: account.ID}
+	defer func() {
+		if result != nil {
+			result.Duration = time.Since(startedAt)
+		}
+	}()
 	baseURL := account.GetBaseURL()
 	if baseURL == "" {
 		baseURL = "https://google.serper.dev"
@@ -178,15 +284,18 @@ func (s *SerperGatewayService) forwardToAccount(
 	}
 	upstreamReq.Header.Set("X-API-KEY", apiKey)
 
+	result.UpstreamAttempted = true
 	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 	if err != nil {
-		return nil, false, fmt.Errorf("serper: upstream request failed: %w", err)
+		return result, false, fmt.Errorf("serper: upstream request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	result.StatusCode = resp.StatusCode
+	result.Header = resp.Header.Clone()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, serperMaxResponseSize))
 	if err != nil {
-		return nil, false, fmt.Errorf("serper: read upstream body: %w", err)
+		return result, false, fmt.Errorf("serper: read upstream body: %w", err)
 	}
 
 	// 429（限流）/ 403（鉴权/额度）：踢出账号并换号重试。
@@ -194,18 +303,49 @@ func (s *SerperGatewayService) forwardToAccount(
 		if s.rateLimitService != nil {
 			s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 		}
-		return &SerperForwardResult{
-			StatusCode: resp.StatusCode,
-			Header:     resp.Header.Clone(),
-			Body:       respBody,
-			AccountID:  account.ID,
-		}, true, nil
+		result.Body = respBody
+		return result, true, nil
 	}
 
-	return &SerperForwardResult{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header.Clone(),
-		Body:       respBody,
-		AccountID:  account.ID,
-	}, false, nil
+	result.Body = respBody
+	if resp.StatusCode == http.StatusBadRequest && isSerperCreditsExhaustedResponse(respBody) {
+		s.disableCreditsExhaustedAccount(account.ID)
+		return result, true, nil
+	}
+	return result, false, nil
+}
+
+type serperCreditsErrorResponse struct {
+	Message    string          `json:"message"`
+	StatusCode json.RawMessage `json:"statusCode"`
+}
+
+func isSerperCreditsExhausted(result *SerperForwardResult) bool {
+	return result != nil && result.StatusCode == http.StatusBadRequest && isSerperCreditsExhaustedResponse(result.Body)
+}
+
+func isSerperCreditsExhaustedResponse(body []byte) bool {
+	var payload serperCreditsErrorResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	if payload.Message != "Not enough credits" {
+		return false
+	}
+	if len(payload.StatusCode) == 0 {
+		return true
+	}
+	var statusCode int
+	return json.Unmarshal(payload.StatusCode, &statusCode) == nil && statusCode == http.StatusBadRequest
+}
+
+func (s *SerperGatewayService) disableCreditsExhaustedAccount(accountID int64) {
+	if s == nil || s.gateway == nil || s.gateway.accountRepo == nil || accountID <= 0 {
+		return
+	}
+	updateCtx, cancel := context.WithTimeout(context.Background(), serperSchedulableUpdateTimeout)
+	defer cancel()
+	if err := s.gateway.accountRepo.SetSchedulable(updateCtx, accountID, false); err != nil {
+		slog.Warn("serper_credits_exhausted_set_schedulable_failed", "account_id", accountID, "error", err)
+	}
 }

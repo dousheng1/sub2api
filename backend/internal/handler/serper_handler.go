@@ -7,10 +7,15 @@ package handler
 // 并转发到上游，再把上游响应原样写回客户端。
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -22,9 +27,10 @@ const serperMaxRequestBody = 1 * 1024 * 1024 // 1 MiB
 
 // SerperHandler 处理 serper 反代请求。
 type SerperHandler struct {
-	serperGatewayService *service.SerperGatewayService
-	concurrencyHelper    *ConcurrencyHelper
-	billingCacheService  *service.BillingCacheService
+	serperGatewayService  *service.SerperGatewayService
+	concurrencyHelper     *ConcurrencyHelper
+	billingCacheService   *service.BillingCacheService
+	usageRecordWorkerPool *service.UsageRecordWorkerPool
 }
 
 // NewSerperHandler 构造 serper handler。
@@ -32,11 +38,13 @@ func NewSerperHandler(
 	serperGatewayService *service.SerperGatewayService,
 	concurrencyHelper *ConcurrencyHelper,
 	billingCacheService *service.BillingCacheService,
+	usageRecordWorkerPool *service.UsageRecordWorkerPool,
 ) *SerperHandler {
 	return &SerperHandler{
-		serperGatewayService: serperGatewayService,
-		concurrencyHelper:    concurrencyHelper,
-		billingCacheService:  billingCacheService,
+		serperGatewayService:  serperGatewayService,
+		concurrencyHelper:     concurrencyHelper,
+		billingCacheService:   billingCacheService,
+		usageRecordWorkerPool: usageRecordWorkerPool,
 	}
 }
 
@@ -75,6 +83,11 @@ func (h *SerperHandler) Search(c *gin.Context) {
 	)
 	if err != nil {
 		status, code, message := concurrencyErrorResponse(err, "user")
+		if status == http.StatusTooManyRequests {
+			// A full pending queue is a temporary admission failure. Give clients
+			// a short retry hint instead of making them guess a backoff interval.
+			c.Header("Retry-After", "1")
+		}
 		serperErrorResponse(c, status, code, message)
 		return
 	}
@@ -114,14 +127,122 @@ func (h *SerperHandler) Search(c *gin.Context) {
 		c.Request.Header,
 		body,
 	)
+	if result != nil && result.UpstreamAttempted {
+		h.recordUsageLog(c, apiKey, subscription, result)
+	}
 	if err != nil {
+		var capacityErr *service.SerperCapacityError
+		if errors.As(err, &capacityErr) {
+			retryAfter := capacityErr.RetryAfter
+			if retryAfter < 1 {
+				retryAfter = 1
+			}
+			c.Header("Retry-After", strconv.Itoa(retryAfter))
+			serperErrorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Serper account capacity is temporarily full")
+			return
+		}
+
+		var creditsExhaustedErr *service.SerperCreditsExhaustedError
+		if errors.As(err, &creditsExhaustedErr) && creditsExhaustedErr.Result != nil {
+			if result == nil || !result.UpstreamAttempted {
+				h.recordUsageLog(c, apiKey, subscription, creditsExhaustedErr.Result)
+			}
+			writeSerperForwardResult(c, creditsExhaustedErr.Result)
+			return
+		}
+
+		var rateLimitErr *service.SerperRateLimitError
+		if errors.As(err, &rateLimitErr) && rateLimitErr.Result != nil {
+			if result == nil || !result.UpstreamAttempted {
+				h.recordUsageLog(c, apiKey, subscription, rateLimitErr.Result)
+			}
+			writeSerperForwardResult(c, rateLimitErr.Result)
+			return
+		}
+
 		serperErrorResponse(c, http.StatusServiceUnavailable, "api_error", err.Error())
 		return
 	}
 
-	// 透传上游 Content-Type，写回状态码与响应体。
+	writeSerperForwardResult(c, result)
+}
+
+func (h *SerperHandler) recordUsageLog(c *gin.Context, apiKey *service.APIKey, subscription *service.UserSubscription, result *service.SerperForwardResult) {
+	if h == nil || h.serperGatewayService == nil || c == nil || apiKey == nil || apiKey.User == nil || result == nil || !result.UpstreamAttempted || result.AccountID == 0 {
+		return
+	}
+
+	model := "serper/search"
+	billingMode := string(service.BillingModePerRequest)
+	durationMs := int(result.Duration.Milliseconds())
+	if durationMs < 0 {
+		durationMs = 0
+	}
+	billingType := service.BillingTypeBalance
+	if subscription != nil && apiKey.Group != nil && apiKey.Group.IsSubscriptionType() {
+		billingType = service.BillingTypeSubscription
+	}
+	usageLog := &service.UsageLog{
+		UserID:           apiKey.User.ID,
+		APIKeyID:         apiKey.ID,
+		AccountID:        result.AccountID,
+		Model:            model,
+		RequestedModel:   model,
+		InboundEndpoint:  serperStringPtr("/serper/search"),
+		UpstreamEndpoint: serperStringPtr("/search"),
+		GroupID:          apiKey.GroupID,
+		SubscriptionID:   serperSubscriptionID(subscription),
+		BillingType:      billingType,
+		BillingMode:      &billingMode,
+		RequestType:      service.RequestTypeSync,
+		Stream:           false,
+		DurationMs:       &durationMs,
+		UserAgent:        serperStringPtr(c.GetHeader("User-Agent")),
+		IPAddress:        serperStringPtr(ip.GetClientIP(c)),
+	}
+
+	task := service.UsageRecordTask(func(ctx context.Context) {
+		_ = h.serperGatewayService.RecordUsageLog(ctx, usageLog)
+	})
+	if h.usageRecordWorkerPool != nil {
+		task = wrapUsageRecordTaskContext(c.Request.Context(), task)
+		if mode := h.usageRecordWorkerPool.Submit(task); mode != service.UsageRecordSubmitModeDropped {
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	task(usageRecordContext(c.Request.Context(), ctx))
+}
+
+func serperSubscriptionID(subscription *service.UserSubscription) *int64 {
+	if subscription == nil {
+		return nil
+	}
+	return &subscription.ID
+}
+
+func serperStringPtr(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func writeSerperForwardResult(c *gin.Context, result *service.SerperForwardResult) {
+	if result == nil {
+		serperErrorResponse(c, http.StatusServiceUnavailable, "api_error", "Service temporarily unavailable")
+		return
+	}
+	// 透传上游 Content-Type 和 Retry-After，写回状态码与响应体。
 	if ct := result.Header.Get("Content-Type"); ct != "" {
 		c.Header("Content-Type", ct)
+	}
+	if retryAfter := result.Header.Get("Retry-After"); retryAfter != "" {
+		c.Header("Retry-After", retryAfter)
+	} else if result.StatusCode == http.StatusTooManyRequests {
+		c.Header("Retry-After", "1")
 	}
 	c.Status(result.StatusCode)
 	_, _ = c.Writer.Write(result.Body)

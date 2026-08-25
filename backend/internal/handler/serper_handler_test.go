@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,8 +21,10 @@ import (
 
 type serperHandlerAccountRepoStub struct {
 	service.AccountRepository
-	account   *service.Account
-	listCalls int32
+	account              *service.Account
+	listCalls            int32
+	schedulableUpdates   map[int64]bool
+	schedulableUpdateErr error
 }
 
 func (s *serperHandlerAccountRepoStub) GetByID(context.Context, int64) (*service.Account, error) {
@@ -30,12 +33,32 @@ func (s *serperHandlerAccountRepoStub) GetByID(context.Context, int64) (*service
 
 func (s *serperHandlerAccountRepoStub) ListSchedulableByGroupIDAndPlatform(context.Context, int64, string) ([]service.Account, error) {
 	atomic.AddInt32(&s.listCalls, 1)
+	if s.account == nil || !s.account.IsSchedulable() {
+		return nil, service.ErrNoAvailableAccounts
+	}
 	return []service.Account{*s.account}, nil
 }
 
 func (s *serperHandlerAccountRepoStub) ListSchedulableByPlatform(context.Context, string) ([]service.Account, error) {
 	atomic.AddInt32(&s.listCalls, 1)
+	if s.account == nil || !s.account.IsSchedulable() {
+		return nil, service.ErrNoAvailableAccounts
+	}
 	return []service.Account{*s.account}, nil
+}
+
+func (s *serperHandlerAccountRepoStub) SetSchedulable(_ context.Context, id int64, schedulable bool) error {
+	if s.schedulableUpdates == nil {
+		s.schedulableUpdates = make(map[int64]bool)
+	}
+	s.schedulableUpdates[id] = schedulable
+	if s.schedulableUpdateErr != nil {
+		return s.schedulableUpdateErr
+	}
+	if s.account != nil && s.account.ID == id {
+		s.account.Schedulable = schedulable
+	}
+	return nil
 }
 
 type serperHandlerGroupRepoStub struct {
@@ -52,15 +75,29 @@ func (s *serperHandlerGroupRepoStub) GetByIDLite(context.Context, int64) (*servi
 }
 
 type serperHandlerUpstreamStub struct {
-	calls int32
+	calls      int32
+	statusCode int
+	body       string
+	err        error
 }
 
 func (s *serperHandlerUpstreamStub) Do(*http.Request, string, int64, int) (*http.Response, error) {
 	atomic.AddInt32(&s.calls, 1)
+	if s.err != nil {
+		return nil, s.err
+	}
+	statusCode := s.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	body := s.body
+	if body == "" {
+		body = `{"ok":true}`
+	}
 	return &http.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: statusCode,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		Body:       io.NopCloser(strings.NewReader(body)),
 	}, nil
 }
 
@@ -113,6 +150,32 @@ type serperHandlerQueueFullCacheStub struct {
 	acquireCalls int32
 }
 
+type serperHandlerUsageLogRepoStub struct {
+	service.UsageLogRepository
+	mu   sync.Mutex
+	logs []*service.UsageLog
+}
+
+func (s *serperHandlerUsageLogRepoStub) Create(_ context.Context, log *service.UsageLog) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logs = append(s.logs, log)
+	return true, nil
+}
+
+func (s *serperHandlerUsageLogRepoStub) CreateBestEffort(_ context.Context, log *service.UsageLog) error {
+	_, err := s.Create(context.Background(), log)
+	return err
+}
+
+func (s *serperHandlerUsageLogRepoStub) snapshot() []*service.UsageLog {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	logs := make([]*service.UsageLog, len(s.logs))
+	copy(logs, s.logs)
+	return logs
+}
+
 func (s *serperHandlerQueueFullCacheStub) AcquireUserSlot(context.Context, int64, int, string) (bool, error) {
 	atomic.AddInt32(&s.acquireCalls, 1)
 	return false, nil
@@ -129,6 +192,7 @@ type serperHandlerFixture struct {
 	accountRepo      *serperHandlerAccountRepoStub
 	upstream         *serperHandlerUpstreamStub
 	billing          *service.BillingCacheService
+	usageLogs        *serperHandlerUsageLogRepoStub
 }
 
 func newSerperHandlerFixture(t *testing.T, cfg *config.Config, billingCache service.BillingCache, rpmCache service.UserRPMCache) *serperHandlerFixture {
@@ -164,13 +228,14 @@ func newSerperHandlerFixture(t *testing.T, cfg *config.Config, billingCache serv
 	}
 	concurrencyService := service.NewConcurrencyService(concurrencyCache)
 	upstream := &serperHandlerUpstreamStub{}
+	usageLogs := &serperHandlerUsageLogRepoStub{}
 	billing := service.NewBillingCacheService(billingCache, nil, nil, nil, rpmCache, nil, cfg, nil)
 	t.Cleanup(billing.Stop)
 
 	gateway := service.NewGatewayService(
 		accountRepo,
 		groupRepo,
-		nil,
+		usageLogs,
 		nil,
 		nil,
 		nil,
@@ -201,12 +266,13 @@ func newSerperHandlerFixture(t *testing.T, cfg *config.Config, billingCache serv
 	concurrencyHelper := NewConcurrencyHelper(concurrencyService, SSEPingFormatNone, 0)
 
 	return &serperHandlerFixture{
-		handler:          NewSerperHandler(serperGateway, concurrencyHelper, billing),
+		handler:          NewSerperHandler(serperGateway, concurrencyHelper, billing, nil),
 		apiKey:           &service.APIKey{ID: 901, UserID: user.ID, GroupID: &groupID, User: user, Group: group},
 		concurrencyCache: concurrencyCache,
 		accountRepo:      accountRepo,
 		upstream:         upstream,
 		billing:          billing,
+		usageLogs:        usageLogs,
 	}
 }
 
@@ -243,6 +309,102 @@ func TestSerperHandlerSearchAcquiresAndReleasesUserSlot(t *testing.T) {
 	require.Equal(t, int32(1), atomic.LoadInt32(&fixture.upstream.calls))
 }
 
+func TestSerperHandlerCreditsExhaustedDisablesAccountAndPreservesResponse(t *testing.T) {
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = false
+	cfg.Security.URLAllowlist.Enabled = true
+	cfg.Security.URLAllowlist.UpstreamHosts = []string{"google.serper.dev"}
+	fixture := newSerperHandlerFixture(t, cfg, nil, nil)
+	fixture.upstream.statusCode = http.StatusBadRequest
+	fixture.upstream.body = `{"message":"Not enough credits","statusCode":400}`
+
+	recorder := performSerperSearch(t, fixture)
+
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	require.JSONEq(t, `{"message":"Not enough credits","statusCode":400}`, recorder.Body.String())
+	require.Equal(t, map[int64]bool{801: false}, fixture.accountRepo.schedulableUpdates)
+	require.False(t, fixture.accountRepo.account.Schedulable)
+	require.Equal(t, int32(1), atomic.LoadInt32(&fixture.upstream.calls))
+	require.Len(t, fixture.usageLogs.snapshot(), 1)
+}
+
+func TestSerperHandlerWritesAuditOnlyUsageLog(t *testing.T) {
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = false
+	cfg.Security.URLAllowlist.Enabled = true
+	cfg.Security.URLAllowlist.UpstreamHosts = []string{"google.serper.dev"}
+	fixture := newSerperHandlerFixture(t, cfg, nil, nil)
+
+	recorder := performSerperSearch(t, fixture)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	logs := fixture.usageLogs.snapshot()
+	require.Len(t, logs, 1)
+	log := logs[0]
+	require.NotEmpty(t, log.RequestID)
+	require.Equal(t, int64(701), log.UserID)
+	require.Equal(t, int64(901), log.APIKeyID)
+	require.Equal(t, int64(801), log.AccountID)
+	require.Equal(t, int64(71), *log.GroupID)
+	require.Equal(t, "serper/search", log.Model)
+	require.Equal(t, "serper/search", log.RequestedModel)
+	require.Equal(t, "/serper/search", *log.InboundEndpoint)
+	require.Equal(t, "/search", *log.UpstreamEndpoint)
+	require.Equal(t, service.RequestTypeSync, log.RequestType)
+	require.False(t, log.Stream)
+	require.Equal(t, service.BillingTypeBalance, log.BillingType)
+	require.Equal(t, string(service.BillingModePerRequest), *log.BillingMode)
+	require.Zero(t, log.InputTokens)
+	require.Zero(t, log.OutputTokens)
+	require.Zero(t, log.TotalCost)
+	require.Zero(t, log.ActualCost)
+	require.NotNil(t, log.DurationMs)
+}
+
+func TestSerperHandlerWritesOneLogForFinalUpstreamRateLimit(t *testing.T) {
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = false
+	cfg.Security.URLAllowlist.Enabled = true
+	cfg.Security.URLAllowlist.UpstreamHosts = []string{"google.serper.dev"}
+	fixture := newSerperHandlerFixture(t, cfg, nil, nil)
+	fixture.upstream.statusCode = http.StatusTooManyRequests
+
+	recorder := performSerperSearch(t, fixture)
+
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	require.Len(t, fixture.usageLogs.snapshot(), 1)
+	require.Equal(t, int32(1), atomic.LoadInt32(&fixture.upstream.calls))
+}
+
+func TestSerperHandlerWritesAuditLogForUpstreamServerError(t *testing.T) {
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = false
+	cfg.Security.URLAllowlist.Enabled = true
+	cfg.Security.URLAllowlist.UpstreamHosts = []string{"google.serper.dev"}
+	fixture := newSerperHandlerFixture(t, cfg, nil, nil)
+	fixture.upstream.statusCode = http.StatusBadGateway
+
+	recorder := performSerperSearch(t, fixture)
+
+	require.Equal(t, http.StatusBadGateway, recorder.Code)
+	require.Len(t, fixture.usageLogs.snapshot(), 1)
+}
+
+func TestSerperHandlerWritesLogWhenUpstreamTransportFails(t *testing.T) {
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Gateway.Scheduling.LoadBatchEnabled = false
+	cfg.Security.URLAllowlist.Enabled = true
+	cfg.Security.URLAllowlist.UpstreamHosts = []string{"google.serper.dev"}
+	fixture := newSerperHandlerFixture(t, cfg, nil, nil)
+	fixture.upstream.err = io.ErrUnexpectedEOF
+
+	recorder := performSerperSearch(t, fixture)
+
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Len(t, fixture.usageLogs.snapshot(), 1)
+	require.Equal(t, int32(1), atomic.LoadInt32(&fixture.upstream.calls))
+}
+
 func TestSerperHandlerRPMRejectionDoesNotReachUpstream(t *testing.T) {
 	cfg := &config.Config{RunMode: config.RunModeStandard}
 	cfg.Gateway.Scheduling.LoadBatchEnabled = false
@@ -263,6 +425,7 @@ func TestSerperHandlerRPMRejectionDoesNotReachUpstream(t *testing.T) {
 	require.Equal(t, int32(1), atomic.LoadInt32(&fixture.concurrencyCache.releaseUserCalled))
 	require.Zero(t, atomic.LoadInt32(&fixture.accountRepo.listCalls))
 	require.Zero(t, atomic.LoadInt32(&fixture.upstream.calls))
+	require.Empty(t, fixture.usageLogs.snapshot())
 }
 
 func TestSerperHandlerBillingRejectionDoesNotReachUpstream(t *testing.T) {
@@ -278,6 +441,7 @@ func TestSerperHandlerBillingRejectionDoesNotReachUpstream(t *testing.T) {
 	require.Equal(t, int32(1), atomic.LoadInt32(&fixture.concurrencyCache.releaseUserCalled))
 	require.Zero(t, atomic.LoadInt32(&fixture.accountRepo.listCalls))
 	require.Zero(t, atomic.LoadInt32(&fixture.upstream.calls))
+	require.Empty(t, fixture.usageLogs.snapshot())
 }
 
 func TestSerperHandlerUserConcurrencyQueueFullDoesNotReachUpstream(t *testing.T) {
@@ -293,10 +457,12 @@ func TestSerperHandlerUserConcurrencyQueueFullDoesNotReachUpstream(t *testing.T)
 	recorder := performSerperSearch(t, fixture)
 
 	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	require.Equal(t, "1", recorder.Header().Get("Retry-After"))
 	require.Contains(t, recorder.Body.String(), "Too many pending requests")
 	require.Equal(t, int32(1), atomic.LoadInt32(&queueFullCache.acquireCalls))
 	require.Zero(t, atomic.LoadInt32(&fixture.accountRepo.listCalls))
 	require.Zero(t, atomic.LoadInt32(&fixture.upstream.calls))
+	require.Empty(t, fixture.usageLogs.snapshot())
 }
 
 func TestSerperHandlerUserRPMRejectionDoesNotReachUpstream(t *testing.T) {
@@ -318,6 +484,7 @@ func TestSerperHandlerUserRPMRejectionDoesNotReachUpstream(t *testing.T) {
 	require.Equal(t, int32(1), atomic.LoadInt32(&fixture.concurrencyCache.releaseUserCalled))
 	require.Zero(t, atomic.LoadInt32(&fixture.accountRepo.listCalls))
 	require.Zero(t, atomic.LoadInt32(&fixture.upstream.calls))
+	require.Empty(t, fixture.usageLogs.snapshot())
 }
 
 func TestSerperHandlerAPIKeyRollingLimitRejectionDoesNotReachUpstream(t *testing.T) {
@@ -339,4 +506,5 @@ func TestSerperHandlerAPIKeyRollingLimitRejectionDoesNotReachUpstream(t *testing
 	require.Equal(t, int32(1), atomic.LoadInt32(&fixture.concurrencyCache.releaseUserCalled))
 	require.Zero(t, atomic.LoadInt32(&fixture.accountRepo.listCalls))
 	require.Zero(t, atomic.LoadInt32(&fixture.upstream.calls))
+	require.Empty(t, fixture.usageLogs.snapshot())
 }
