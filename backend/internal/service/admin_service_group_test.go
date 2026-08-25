@@ -4,8 +4,10 @@ package service
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/stretchr/testify/require"
 )
@@ -154,6 +156,61 @@ func (s *groupRepoStubForAdmin) GetAccountIDsByGroupIDs(_ context.Context, group
 
 func (s *groupRepoStubForAdmin) UpdateSortOrders(_ context.Context, _ []GroupSortOrderUpdate) error {
 	return nil
+}
+
+func TestAdminService_CreateGroup_RejectsTimePricing(t *testing.T) {
+	repo := &groupRepoStubForAdmin{createID: 51}
+	svc := &adminServiceImpl{groupRepo: repo}
+
+	_, err := svc.CreateGroup(context.Background(), &CreateGroupInput{
+		Name:           "time-pricing-group",
+		Platform:       PlatformOpenAI,
+		RateMultiplier: 1,
+		ModelPricing: []ChannelModelPricing{{
+			Platform:    PlatformOpenAI,
+			Models:      []string{"gpt-5"},
+			BillingMode: BillingModeToken,
+			TimePricing: validTimePricingForTest(),
+		}},
+	})
+
+	require.Error(t, err)
+	appErr := infraerrors.FromError(err)
+	require.Equal(t, int32(http.StatusBadRequest), appErr.Code)
+	require.Equal(t, "GROUP_MODEL_TIME_PRICING_UNSUPPORTED", appErr.Reason)
+	require.Nil(t, repo.created)
+}
+
+func TestAdminService_UpdateGroup_RejectsTimePricing(t *testing.T) {
+	existing := &Group{ID: 1, Name: "existing", Platform: PlatformOpenAI, Status: StatusActive}
+	repo := &groupRepoStubForAdmin{getByID: existing}
+	svc := &adminServiceImpl{groupRepo: repo}
+	pricing := []ChannelModelPricing{{
+		Platform:    PlatformOpenAI,
+		Models:      []string{"gpt-5"},
+		BillingMode: BillingModeToken,
+		TimePricing: validTimePricingForTest(),
+	}}
+
+	_, err := svc.UpdateGroup(context.Background(), existing.ID, &UpdateGroupInput{ModelPricing: &pricing})
+
+	require.Error(t, err)
+	appErr := infraerrors.FromError(err)
+	require.Equal(t, int32(http.StatusBadRequest), appErr.Code)
+	require.Equal(t, "GROUP_MODEL_TIME_PRICING_UNSUPPORTED", appErr.Reason)
+	require.Nil(t, repo.updated)
+}
+
+func TestNormalizeGroupModelPricing_NormalizesEmptyTimePricing(t *testing.T) {
+	pricing, err := normalizeGroupModelPricing(PlatformOpenAI, []ChannelModelPricing{{
+		Models:      []string{"gpt-5"},
+		BillingMode: BillingModeToken,
+		TimePricing: &ChannelTimePricing{Timezone: "Asia/Shanghai"},
+	}})
+
+	require.NoError(t, err)
+	require.Len(t, pricing, 1)
+	require.Nil(t, pricing[0].TimePricing)
 }
 
 type compositeRouteRepoStubForAdmin struct {
@@ -972,6 +1029,44 @@ func TestAdminService_CreateGroup_ClearsMessagesDispatchFieldsForNonOpenAIPlatfo
 	require.Equal(t, OpenAIMessagesDispatchModelConfig{}, repo.created.MessagesDispatchModelConfig)
 }
 
+func TestAdminService_CreateCompositeGroupPreservesLive(t *testing.T) {
+	repo := &groupRepoStubForAdmin{}
+	svc := &adminServiceImpl{groupRepo: repo}
+
+	group, err := svc.CreateGroup(context.Background(), &CreateGroupInput{
+		Name:           "composite-group",
+		Platform:       PlatformComposite,
+		RateMultiplier: 1.0,
+		AllowLive:      true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, group)
+	require.NotNil(t, repo.created)
+	require.True(t, repo.created.AllowLive)
+}
+
+func TestAdminService_UpdateCompositeGroupPreservesLive(t *testing.T) {
+	existingGroup := &Group{
+		ID:       1,
+		Name:     "composite-group",
+		Platform: PlatformComposite,
+		Status:   StatusActive,
+	}
+	repo := &groupRepoStubForAdmin{getByID: existingGroup}
+	svc := &adminServiceImpl{groupRepo: repo}
+	allowLive := true
+
+	group, err := svc.UpdateGroup(context.Background(), existingGroup.ID, &UpdateGroupInput{
+		AllowLive: &allowLive,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, group)
+	require.NotNil(t, repo.updated)
+	require.True(t, repo.updated.AllowLive)
+}
+
 func TestAdminService_UpdateGroup_ClearsMessagesDispatchFieldsWhenPlatformChangesAwayFromOpenAI(t *testing.T) {
 	existingGroup := &Group{
 		ID:                    1,
@@ -1588,12 +1683,36 @@ func TestAdminService_CreateCompositeRoute_NormalizesAndPersists(t *testing.T) {
 	require.Equal(t, "router/gpt-", route.PublicModel)
 	require.Equal(t, CompositeRouteMatchPrefix, route.MatchType)
 	require.Equal(t, PlatformOpenAI, route.TargetPlatform)
-	require.Equal(t, "router/gpt-", route.UpstreamModel)
+	// prefix 路由留空 upstream_model 不再回填 public_model：留空表示透传原始请求模型。
+	require.Equal(t, "", route.UpstreamModel)
 	require.Equal(t, CompositeRouteEndpointResponses, route.Endpoint)
 	require.Equal(t, 100, route.Priority)
 	require.True(t, route.Enabled)
 	require.Equal(t, "route note", route.Notes)
 	require.Equal(t, route, routeRepo.created)
+}
+
+// TestAdminService_CreateCompositeRoute_ExactEmptyUpstreamBackfillsPublicModel 锁定
+// 保守行为：exact 路由留空 upstream_model 仍回填 public_model（持久化/展示契约不变）。
+func TestAdminService_CreateCompositeRoute_ExactEmptyUpstreamBackfillsPublicModel(t *testing.T) {
+	groupRepo := &groupRepoStubForAdmin{
+		getByID: &Group{ID: 7, Platform: PlatformComposite},
+	}
+	routeRepo := &compositeRouteRepoStubForAdmin{nextID: 99}
+	svc := &adminServiceImpl{groupRepo: groupRepo, compositeRouteRepo: routeRepo}
+
+	route, err := svc.CreateCompositeRoute(context.Background(), 7, CompositeRouteInput{
+		PublicModel:    "openrouter/gpt-5",
+		MatchType:      CompositeRouteMatchExact,
+		TargetPlatform: PlatformOpenAI,
+		Endpoint:       CompositeRouteEndpointResponses,
+		Enabled:        true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, route)
+	require.Equal(t, CompositeRouteMatchExact, route.MatchType)
+	require.Equal(t, "openrouter/gpt-5", route.UpstreamModel)
 }
 
 func TestAdminService_UpdateAndDeleteCompositeRouteRequireRouteOwnership(t *testing.T) {
